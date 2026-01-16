@@ -1,138 +1,136 @@
-use num_cpus;
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use clap::Parser;
+use ring::hmac;
 use std::process::exit;
-use crypto::hmac::Hmac;
-use crypto::sha2::Sha256;
-use crypto::mac::Mac;
-use structopt::StructOpt;
-use scoped_threadpool::Pool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
 
-#[derive(StructOpt, Debug)]
-#[structopt(name = "args", about = "arguments")]
-struct Opt {
-    #[structopt(short = "t", long = "token", help = "the JWT token",
-    default_value = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
-                eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWV9.\
-                cAOIAifu3fykvhkHpbuhbvtH807-Z2rI1FS3vX1XMjE")]
+#[derive(Parser, Debug)]
+#[command(name = "jwtc", about = "JWT secret brute-forcer")]
+struct Args {
+    #[arg(
+        short = 't',
+        long = "token",
+        help = "the JWT token",
+        default_value = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
+            eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWV9.\
+            cAOIAifu3fykvhkHpbuhbvtH807-Z2rI1FS3vX1XMjE"
+    )]
     token: String,
 
-    #[structopt(short = "a", long = "alphabet", help = "the alphabet",
-    default_value = "eariotnslcudpmhgbfywkvxzjqEARIOTNSLCUDPMHGBFYWKVXZJQ0123456789")]
+    #[arg(
+        short = 'a',
+        long = "alphabet",
+        help = "the alphabet",
+        default_value = "eariotnslcudpmhgbfywkvxzjqEARIOTNSLCUDPMHGBFYWKVXZJQ0123456789"
+    )]
     alphabet: String,
 
-    #[structopt(short = "x", long = "maxlength", help = "Maximum Length", default_value = "6")]
+    #[arg(
+        short = 'x',
+        long = "maxlength",
+        help = "Maximum Length",
+        default_value = "6"
+    )]
     max_length: usize,
 }
 
 fn main() {
-    use rustc_serialize::base64::{ToBase64, FromBase64, STANDARD};
+    let args = Args::parse();
 
-    let opt = Opt::from_args();
-    println!("{:?}", opt);
-
-    let token: &str = &opt.token;
-
-    let parts: Vec<&str> = token.split(".").collect();
-    println!("{:?}", parts);
-
-    // Decode the signature
-    let presented_header: &[u8] =
-        &parts[0].from_base64().expect("JWT header Base64 decoding failed");
-    let presented_payload: &[u8] =
-        &parts[1].from_base64().expect("JWT payload Base64 decoding failed");
-    let presented_signature: &[u8] =
-        &parts[2].from_base64().expect("JWT signature Base64 decoding failed");
-
-    let mut message_to_encrypt = String::new();
-    message_to_encrypt.push_str(&presented_header.clone().to_base64(STANDARD));
-    message_to_encrypt.push('.');
-    message_to_encrypt.push_str(&presented_payload.clone().to_base64(STANDARD));
-
-    println!();
-    println!("Presented Header: {}",
-             String::from_utf8_lossy(presented_header));
-    println!("Presented Payload: {}",
-             String::from_utf8_lossy(presented_payload));
-    println!("Presented Signature (len) {}: {}",
-             presented_signature.len(),
-             String::from_utf8_lossy(presented_signature));
-    println!();
-
-   get_words(&opt.alphabet, opt.max_length, &presented_signature, &message_to_encrypt);
-}
-
-
-fn get_words(alphabet_str: &str, max_length: usize, presented_signature: &[u8], data_to_sign: &str) {
-    let alphabet = alphabet_str.as_bytes();
-    let data_to_sign = data_to_sign.as_bytes();
-    let alphabet_str = alphabet_str.as_bytes();
-
-    // index[0] is words with length 1. index[1] is words with length 2. index[2] is words with length 3.
-    let mut index: Vec<Vec<u8>> = Vec::new();
-
-    for letter in alphabet_str {
-        index.push(vec![*letter]);
+    let parts: Vec<&str> = args.token.split('.').collect();
+    if parts.len() != 3 {
+        eprintln!("Invalid JWT token format");
+        exit(1);
     }
 
-    let mut pool = Pool::new(num_cpus::get() as u32);
-    let sha256 = Sha256::new();
+    let presented_signature = URL_SAFE_NO_PAD
+        .decode(parts[2])
+        .expect("JWT signature Base64 decoding failed");
 
-    pool.scoped(|scoped| {
-        for length in 1..max_length {
-            println!("Checking secrets of length {}", length);
-            let mut new_words: Vec<Vec<u8>> = Vec::new();
+    let message_to_sign = format!("{}.{}", parts[0], parts[1]);
 
-            while let Some(existing_word) = index.pop() {
-                for character in alphabet {
-                    let mut secret = existing_word.clone();
-                    secret.push(*character);
-                    new_words.push(secret.clone());
-                    // let secret = secret.as_bytes();
-                    scoped.execute(move || {
-                        let mut hmac = Hmac::new(sha256, &secret);
-                        hmac.input(data_to_sign);
+    println!("Token: {}", args.token);
+    println!(
+        "Alphabet: {} ({} chars)",
+        args.alphabet,
+        args.alphabet.len()
+    );
+    println!("Max length: {}", args.max_length);
+    println!();
 
-                        if &presented_signature == &hmac.result().code() {
-                            // println!("Found! Created signature    : {} using the secret: {}", String::from_utf8_lossy(raw.as_slice()), secret);
-                            println!("Found using the secret: {}", String::from_utf8_lossy(&secret.to_vec()));
-                            exit(0);
-                        }
-                    });
-                };
-            }
-
-            index = new_words;
-        }
-    });
+    search_secret(
+        args.alphabet.as_bytes(),
+        args.max_length,
+        &presented_signature,
+        message_to_sign.as_bytes(),
+    );
 }
 
+fn search_secret(alphabet: &[u8], max_length: usize, target_signature: &[u8], message: &[u8]) {
+    let found = AtomicBool::new(false);
+    let num_threads = num_cpus::get();
+
+    for len in 1..=max_length {
+        if found.load(Ordering::Relaxed) {
+            return;
+        }
+        println!("Checking length {}", len);
+
+        let total: usize = alphabet.len().pow(len as u32);
+        let chunk_size = (total + num_threads - 1) / num_threads;
+
+        thread::scope(|s| {
+            for thread_id in 0..num_threads {
+                let start = thread_id * chunk_size;
+                let end = (start + chunk_size).min(total);
+                let found = &found;
+
+                s.spawn(move || {
+                    let mut buffer = [0u8; 64];
+
+                    for idx in start..end {
+                        if found.load(Ordering::Relaxed) {
+                            return;
+                        }
+
+                        let mut n = idx;
+                        for i in (0..len).rev() {
+                            buffer[i] = alphabet[n % alphabet.len()];
+                            n /= alphabet.len();
+                        }
+
+                        let secret = &buffer[..len];
+                        let key = hmac::Key::new(hmac::HMAC_SHA256, secret);
+                        let tag = hmac::sign(&key, message);
+
+                        if tag.as_ref() == target_signature {
+                            println!("Found secret: {}", String::from_utf8_lossy(secret));
+                            found.store(true, Ordering::SeqCst);
+                            exit(0);
+                        }
+                    }
+                });
+            }
+        });
+    }
+
+    println!("Secret not found");
+}
 
 #[cfg(test)]
 mod test {
-    use rustc_serialize::base64::{ToBase64, FromBase64, STANDARD};
-    use super::get_words;
+    use super::*;
 
     #[test]
     fn check_works() {
-        let parts: Vec<&str> = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
-                                eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWV9.\
-                                cAOIAifu3fykvhkHpbuhbvtH807-Z2rI1FS3vX1XMjE".split(".").collect();
-        println!("{:?}", parts);
+        let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
+                     eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWV9.\
+                     cAOIAifu3fykvhkHpbuhbvtH807-Z2rI1FS3vX1XMjE";
+        let parts: Vec<&str> = token.split('.').collect();
+        let signature = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
+        let message = format!("{}.{}", parts[0], parts[1]);
 
-        // Decode the signature
-        let presented_header: Vec<u8> =
-            parts[0].from_base64().expect("JWT header Base64 decoding failed");
-        let presented_payload: Vec<u8> =
-            parts[1].from_base64().expect("JWT payload Base64 decoding failed");
-        let presented_signature: Vec<u8> =
-            parts[2].from_base64().expect("JWT signature Base64 decoding failed");
-
-        let mut message_to_encrypt = String::new();
-        message_to_encrypt.push_str(&presented_header.clone().to_base64(STANDARD));
-        message_to_encrypt.push('.');
-        message_to_encrypt.push_str(&presented_payload.clone().to_base64(STANDARD));
-
-        let alphabet = "Sn1f";
-
-        get_words(&alphabet, 4, &presented_signature, &message_to_encrypt);
+        search_secret(b"Sn1f", 5, &signature, message.as_bytes());
     }
 }
