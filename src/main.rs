@@ -59,21 +59,26 @@ fn main() {
     println!("Max length: {}", args.max_length);
     println!();
 
-    search_secret(
+    let result = search_secret(
         args.alphabet.as_bytes(),
         args.max_length,
         &presented_signature,
         message_to_sign.as_bytes(),
     );
+
+    if result.is_none() {
+        exit(1);
+    }
 }
 
-fn search_secret(alphabet: &[u8], max_length: usize, target_signature: &[u8], message: &[u8]) {
+fn search_secret(alphabet: &[u8], max_length: usize, target_signature: &[u8], message: &[u8]) -> Option<Vec<u8>> {
     let found = AtomicBool::new(false);
     let num_threads = num_cpus::get();
+    let result: std::sync::Mutex<Option<Vec<u8>>> = std::sync::Mutex::new(None);
 
     for len in 1..=max_length {
         if found.load(Ordering::Relaxed) {
-            return;
+            break;
         }
         println!("Checking length {}", len);
 
@@ -85,6 +90,7 @@ fn search_secret(alphabet: &[u8], max_length: usize, target_signature: &[u8], me
                 let start = thread_id * chunk_size;
                 let end = (start + chunk_size).min(total);
                 let found = &found;
+                let result = &result;
 
                 s.spawn(move || {
                     let mut buffer = [0u8; 64];
@@ -106,8 +112,9 @@ fn search_secret(alphabet: &[u8], max_length: usize, target_signature: &[u8], me
 
                         if tag.as_ref() == target_signature {
                             println!("Found secret: {}", String::from_utf8_lossy(secret));
+                            *result.lock().unwrap() = Some(secret.to_vec());
                             found.store(true, Ordering::SeqCst);
-                            exit(0);
+                            return;
                         }
                     }
                 });
@@ -115,12 +122,17 @@ fn search_secret(alphabet: &[u8], max_length: usize, target_signature: &[u8], me
         });
     }
 
-    println!("Secret not found");
+    let res = result.lock().unwrap().take();
+    if res.is_none() {
+        println!("Secret not found");
+    }
+    res
 }
 
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::time::Instant;
 
     #[test]
     fn check_works() {
@@ -131,6 +143,38 @@ mod test {
         let signature = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
         let message = format!("{}.{}", parts[0], parts[1]);
 
+        let start = Instant::now();
         search_secret(b"Sn1f", 5, &signature, message.as_bytes());
+        eprintln!("Runtime: {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn check_pass() {
+        // JWT signed with secret "pass"
+        let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
+                     eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWV9.\
+                     -aPN48Dhqq2o2JvIbH0VCZCHhvNVNXC7a0PTmOce-Kk";
+        let parts: Vec<&str> = token.split('.').collect();
+        let signature = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
+        let message = format!("{}.{}", parts[0], parts[1]);
+
+        let start = Instant::now();
+        search_secret(b"abcdefghijklmnopqrstuvwxyz", 4, &signature, message.as_bytes());
+        eprintln!("Runtime: {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn check_secret() {
+        // JWT signed with secret "secret"
+        let token = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.\
+                     eyJzdWIiOiIxMjM0NTY3ODkwIiwibmFtZSI6IkpvaG4gRG9lIiwiYWRtaW4iOnRydWV9.\
+                     TJVA95OrM7E2cBab30RMHrHDcEfxjoYZgeFONFh7HgQ";
+        let parts: Vec<&str> = token.split('.').collect();
+        let signature = URL_SAFE_NO_PAD.decode(parts[2]).unwrap();
+        let message = format!("{}.{}", parts[0], parts[1]);
+
+        let start = Instant::now();
+        search_secret(b"abcdefghijklmnopqrstuvwxyz", 6, &signature, message.as_bytes());
+        eprintln!("Runtime: {:?}", start.elapsed());
     }
 }
